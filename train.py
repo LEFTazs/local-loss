@@ -89,6 +89,9 @@ parser.add_argument('--n_holes', type=int, default=1,
 parser.add_argument('--length', type=int, default=16,
                     help='length of the cutout holes in pixels')
 
+device='cuda:2'
+torch.cuda.set_device(device)
+
 args = parser.parse_args()
 args.cuda = not args.no_cuda and torch.cuda.is_available()
 if args.cuda:
@@ -203,6 +206,23 @@ class KuzushijiMNIST(datasets.MNIST):
         'http://codh.rois.ac.jp/kmnist/dataset/kmnist/t10k-images-idx3-ubyte.gz',
         'http://codh.rois.ac.jp/kmnist/dataset/kmnist/t10k-labels-idx1-ubyte.gz'
     ]
+
+class DataPreprocess(object):
+    def __call__(self, x):
+        return x
+
+class DataPreprocessCifar(DataPreprocess):
+    def __call__(self, x):
+        old_shape = x.shape
+        n_channels = x.shape[1]
+        x = x.view(-1, 32*32*n_channels).t()
+        ms = torch.mean(x,dim=0)
+        x_ms = x - ms
+        Xn = torch.norm(x_ms, p=2, dim=0).detach()
+        x_norm = x_ms.div(Xn.expand_as(x_ms)+1e-17)
+        x_norm = x_norm.t().view(old_shape)
+        return x_norm
+
     
 kwargs = {'num_workers': 0, 'pin_memory': True} if args.cuda else {}
 if args.dataset == 'MNIST':
@@ -278,12 +298,14 @@ elif args.dataset == 'CIFAR10':
     input_dim = 32
     input_ch = 3
     num_classes = 10
+    data_preprocess = DataPreprocessCifar()
     train_transform = transforms.Compose([
-            transforms.RandomCrop(32, padding=4),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize((0.424, 0.415, 0.384), (0.283, 0.278, 0.284))
-        ])
+                    transforms.ToTensor(),
+                    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+                    # transforms.Grayscale(num_output_channels=1),
+                    # transforms.ToTensor(),
+                    # transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),                
+                ])
     if args.cutout:
         train_transform.transforms.append(Cutout(n_holes=args.n_holes, length=args.length))
     dataset_train = datasets.CIFAR10('../data/CIFAR10', train=True, download=True, transform=train_transform)
@@ -294,9 +316,13 @@ elif args.dataset == 'CIFAR10':
     test_loader = torch.utils.data.DataLoader(
         datasets.CIFAR10('../data/CIFAR10', train=False, 
             transform=transforms.Compose([
-                transforms.ToTensor(),
-                transforms.Normalize((0.424, 0.415, 0.384), (0.283, 0.278, 0.284))
-            ])),
+                    transforms.ToTensor(),
+                    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+                    # transforms.Grayscale(num_output_channels=1),
+                    # transforms.ToTensor(),
+                    # transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),                
+                ])
+            ),
         batch_size=args.batch_size, shuffle=False, **kwargs)
 elif args.dataset == 'CIFAR100':
     input_dim = 32
@@ -447,10 +473,10 @@ class LinearFA(nn.Module):
         self.reset_parameters()
         
         if args.cuda:
-            self.weight.data = self.weight.data.cuda()
-            self.weight_fa.data = self.weight_fa.data.cuda()
+            self.weight.data = self.weight.data.cuda(device)
+            self.weight_fa.data = self.weight_fa.data.cuda(device)
             if bias:
-                self.bias.data = self.bias.data.cuda()
+                self.bias.data = self.bias.data.cuda(device)
     
     def reset_parameters(self):
         stdv = 1.0 / math.sqrt(self.weight.size(1))
@@ -1480,7 +1506,7 @@ if checkpoint is not None:
     args = args_backup
     
 if args.cuda:
-    model.cuda()
+    model.cuda(device)
 
 if args.progress_bar:
     from tqdm import tqdm
@@ -1515,12 +1541,13 @@ def train(epoch, lr):
                 
     # Loop train set
     for batch_idx, (data, target) in enumerate(train_loader):
+        data = data_preprocess(data)
         if args.cuda:
-            data, target = data.cuda(), target.cuda()
+            data, target = data.cuda(device), target.cuda(device)
         target_ = target
         target_onehot = to_one_hot(target, num_classes)
         if args.cuda:
-            target_onehot = target_onehot.cuda()
+            target_onehot = target_onehot.cuda(device)
   
         # Clear accumulated gradient
         optimizer.zero_grad()
@@ -1587,12 +1614,13 @@ def test(epoch):
     
     # Loop test set
     for data, target in test_loader:
+        data = data_preprocess(data)
         if args.cuda:
-            data, target = data.cuda(), target.cuda()
+            data, target = data.cuda(device), target.cuda(device)
         target_ = target
         target_onehot = to_one_hot(target, num_classes)
         if args.cuda:
-            target_onehot = target_onehot.cuda()
+            target_onehot = target_onehot.cuda(device)
         
         with torch.no_grad():
             output, _ = model(data, target, target_onehot)
